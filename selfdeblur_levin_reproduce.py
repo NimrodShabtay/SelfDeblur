@@ -30,7 +30,7 @@ parser.add_argument('--save_frequency', type=int, default=1, help='frequency to 
 opt = parser.parse_args()
 #print(opt)
 
-#os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark =True
