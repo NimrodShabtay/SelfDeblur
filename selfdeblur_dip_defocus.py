@@ -27,10 +27,11 @@ import wandb
 
 from Imaging_Fwd_model import FwdModel
 from utils.psf_utils import depth_read
+from utils.losses import TVLoss
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--num_iter', type=int, default=2500, help='number of epochs of training')
+parser.add_argument('--num_iter', type=int, default=5000, help='number of epochs of training')
 parser.add_argument('--img_size', type=int, default=[256, 512], help='size of each image dimension')
 parser.add_argument('--kernel_size', type=int, default=[71, 71], help='size of blur kernel [height, width]')
 parser.add_argument('--data_path', type=str, default="datasets/real", help='path to blurry image')
@@ -122,12 +123,12 @@ for f in input_source[index:index+1]:
 
     net_img = net_img.type(dtype)
 
-    net_psi = skip(input_depth, PSI_CLASSES,
+    net_psi = skip(input_depth, 1,
                    num_channels_down=[128, 128, 128, 128, 128],
                    num_channels_up=[128, 128, 128, 128, 128],
                    num_channels_skip=[16, 16, 16, 16, 16],
                    upsample_mode='bilinear',
-                   need_sigmoid=False, need_bias=True, pad=pad, act_fun='LeakyReLU')
+                   need_sigmoid=True, need_bias=True, pad=pad, act_fun='LeakyReLU')
 
     net_psi = net_psi.type(dtype)
 
@@ -139,6 +140,8 @@ for f in input_source[index:index+1]:
     mse = torch.nn.MSELoss().type(dtype)
     ssim = SSIM().type(dtype)
     softmax = nn.Softmax(dim=1)
+    tv_loss = TVLoss().type(dtype)
+    smoothness_weight = 10
 
     # optimizer
     optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
@@ -157,13 +160,13 @@ for f in input_source[index:index+1]:
     }
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
-                     tags=['defocus', 'deblurring'],
-                     name='deblurring No sigmoid',
+                     tags=['defocus', 'deblurring', 'TVLoss'],
+                     name='deblurring Psi as DIP segmentation + TVLoss on "raw" psi',
                      job_type='train',
                      mode='online',
                      save_code=True,
                      config=log_config,
-                     notes='Inject True Psi Map'
+                     notes='Generate Psi asDIP Segmentation + TVLoss on raw psi map'
                      )
 
     wandb.run.log_code(".")
@@ -185,7 +188,8 @@ for f in input_source[index:index+1]:
         # get the network output
         out_x = net_img(net_img_input)
         out_psi = net_psi(net_psi_input)
-        psi_as_classes = softmax(out_psi).argmax(dim=1).unsqueeze(1).float()
+        # psi_as_classes = out_psi.argmax(dim=1).unsqueeze(1).float()
+        psi_as_classes = (out_psi * (DEPTH_MAX - DEPTH_MIN)).int().float()
         out_rgb = fwd_model(out_x, psi_as_classes)
 
         rgb_size = out_rgb.shape
@@ -198,6 +202,7 @@ for f in input_source[index:index+1]:
         else:
             total_loss = 1 - ssim(out_rgb, img)
 
+        total_loss += (smoothness_weight * tv_loss(out_psi))
         wandb.log({'Loss': total_loss.item()})
         total_loss.backward()
         optimizer.step()
