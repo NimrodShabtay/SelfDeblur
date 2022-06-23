@@ -61,7 +61,7 @@ psi_maps_source.sort()
 save_path = opt.save_path
 os.makedirs(save_path, exist_ok=True)
 
-index = 0
+index = 86
 # start #image
 for f in input_source[index:index+1]:
     INPUT = 'noise'
@@ -141,7 +141,7 @@ for f in input_source[index:index+1]:
     ssim = SSIM().type(dtype)
     softmax = nn.Softmax(dim=1)
     tv_loss = TVLoss().type(dtype)
-    smoothness_weight = 10
+    smoothness_weight = 0.01
 
     # optimizer
     optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
@@ -160,8 +160,8 @@ for f in input_source[index:index+1]:
     }
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
-                     tags=['defocus', 'deblurring', 'TVLoss'],
-                     name='deblurring Psi as DIP segmentation + TVLoss on "raw" psi',
+                     tags=['defocus',  'TVLoss'],
+                     name='Defocus - Psi as DIP segmentation + TVLoss on "raw" psi',
                      job_type='train',
                      mode='online',
                      save_code=True,
