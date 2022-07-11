@@ -27,11 +27,12 @@ import wandb
 
 from Imaging_Fwd_model import FwdModel
 from utils.psf_utils import depth_read
-from utils.losses import TVLoss
+from utils.losses import TVLoss, GradLoss
+from kornia.losses import InverseDepthSmoothnessLoss
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--num_iter', type=int, default=5000, help='number of epochs of training')
+parser.add_argument('--num_iter', type=int, default=10000, help='number of epochs of training')
 parser.add_argument('--img_size', type=int, default=[256, 512], help='size of each image dimension')
 parser.add_argument('--kernel_size', type=int, default=[71, 71], help='size of blur kernel [height, width]')
 parser.add_argument('--data_path', type=str, default="datasets/real", help='path to blurry image')
@@ -49,19 +50,19 @@ dtype = torch.cuda.FloatTensor
 
 warnings.filterwarnings("ignore")
 
-input_source = glob.glob(os.path.join(opt.data_path, 'inputs',  '*.png'))
+input_source = glob.glob(os.path.join(opt.data_path, 'output/rgb',  '*.png'))
 input_source.sort()
 
-sharp_source = glob.glob(os.path.join(opt.data_path, 'sharp_imgs', '*.png'))
+sharp_source = glob.glob(os.path.join(opt.data_path, 'Images', '*.tif'))
 sharp_source.sort()
 
-psi_maps_source = glob.glob(os.path.join(opt.data_path, 'psi_maps', '*.dpt'))
+psi_maps_source = glob.glob(os.path.join(opt.data_path, 'output/GT', '*.dpt'))
 psi_maps_source.sort()
 
 save_path = opt.save_path
 os.makedirs(save_path, exist_ok=True)
 
-index = 86
+index = 0
 # start #image
 for f in input_source[index:index+1]:
     INPUT = 'noise'
@@ -91,16 +92,15 @@ for f in input_source[index:index+1]:
     img /= 255.0
     img_size = img.shape
 
-    sharp_img = read_image(sharp_source[index]).float()
-    sharp_img /= 255.0
+    # sharp_img = read_image(sharp_source[index]).float()
+    sharp_img = torchvision.transforms.ToTensor()(Image.open(sharp_source[index]).convert('RGB'))
+    # sharp_img /= 255.0
     sharp_img_np = sharp_img.permute(1, 2, 0).numpy()
 
     psi_map_ref = depth_read(psi_maps_source[index])
-    psi_map_ref -= 1  # [1, 15] -> [0, 14] (Matlab to Python)
-    # psi_as_classes = torch.from_numpy(psi_map_ref).unsqueeze(0).unsqueeze(1).type(dtype)
-    psi_map_ref += DEPTH_MIN  # from classes to discrete Psi values [0, 14] -> [-4, 10]
-    psi_map_ref = (psi_map_ref - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN)  # [-4, 10] -> [0, 1]
     psi_map_ref = np.expand_dims(psi_map_ref, -1)
+
+    psi_gt = torch.from_numpy(psi_map_ref).permute(2, 0, 1).unsqueeze(0).type(dtype)
     print(imgname)
     # ######################################################################
 
@@ -111,8 +111,8 @@ for f in input_source[index:index+1]:
     img.unsqueeze_(0)
 
     # Should DIP predict the padding as well or to put it at the conv itself????
-    net_img_input = get_noise(input_depth, INPUT, (opt.img_size[0], opt.img_size[1])).type(dtype)
-    net_psi_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
+    net_img_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
+    # net_psi_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
 
     net_img = skip(input_depth, 3,
                    num_channels_down=[128, 128, 128, 128, 128],
@@ -123,33 +123,36 @@ for f in input_source[index:index+1]:
 
     net_img = net_img.type(dtype)
 
-    net_psi = skip(input_depth, 1,
-                   num_channels_down=[128, 128, 128, 128, 128],
-                   num_channels_up=[128, 128, 128, 128, 128],
-                   num_channels_skip=[16, 16, 16, 16, 16],
-                   upsample_mode='bilinear',
-                   need_sigmoid=True, need_bias=True, pad=pad, act_fun='LeakyReLU')
-
-    net_psi = net_psi.type(dtype)
+    # net_psi = skip(input_depth, 1,
+    #                num_channels_down=[128, 128, 128, 128, 128],
+    #                num_channels_up=[128, 128, 128, 128, 128],
+    #                num_channels_skip=[16, 16, 16, 16, 16],
+    #                upsample_mode='bilinear',
+    #                need_sigmoid=True, need_bias=True, pad=pad, act_fun='LeakyReLU')
+    #
+    # net_psi = net_psi.type(dtype)
 
     fwd_model = FwdModel()
-    fwd_model.load_pre_compute_data('/mnt5/nimrod/depth_from_defocus/data/mask_synt_data_cls/headbutt/data.mat')
+    fwd_model.load_pre_compute_data('/mnt5/nimrod/depth_from_defocus/data/mask_synt_data/headbutt/output/data.mat')
     fwd_model.type(dtype)
 
     # Losses
     mse = torch.nn.MSELoss().type(dtype)
     ssim = SSIM().type(dtype)
-    softmax = nn.Softmax(dim=1)
-    tv_loss = TVLoss().type(dtype)
-    smoothness_weight = 0.01
+    # tv_loss = TVLoss().type(dtype)
+    # grad_loss = GradLoss().type(dtype)
+    # depth_smoothness_loss = InverseDepthSmoothnessLoss().type(dtype)
+    # smoothness_weight = 0.1
+    # content_weight = 0.5
 
     # optimizer
-    optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
+    # optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
+    optimizer = torch.optim.Adam([{'params': net_img.parameters()}], lr=LR)
     scheduler = MultiStepLR(optimizer, milestones=[1600, 1900, 2200], gamma=0.5)  # learning rates
 
     # initilization inputs
     net_img_input_saved = net_img_input.detach().clone()
-    net_psi_input_saved = net_psi_input.detach().clone()
+    # net_psi_input_saved = net_psi_input.detach().clone()
 
     log_config = {
         'input depth': input_depth,
@@ -160,13 +163,13 @@ for f in input_source[index:index+1]:
     }
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
-                     tags=['defocus',  'TVLoss'],
-                     name='Defocus - Psi as DIP segmentation + TVLoss on "raw" psi',
+                     tags=['defocus'],
+                     name='Defocus - Psi as GT Sanity',
                      job_type='train',
                      mode='online',
                      save_code=True,
                      config=log_config,
-                     notes='Generate Psi asDIP Segmentation + TVLoss on raw psi map'
+                     notes='Defocus - Psi as GT Sanity'
                      )
 
     wandb.run.log_code(".")
@@ -178,8 +181,8 @@ for f in input_source[index:index+1]:
         net_img_input = net_img_input_saved + reg_noise_std * torch.zeros(net_img_input_saved.shape).type_as(
             net_img_input_saved.data).normal_()
 
-        net_psi_input = net_psi_input_saved + reg_noise_std * torch.zeros(net_psi_input_saved.shape).type_as(
-            net_psi_input_saved.data).normal_()
+        # net_psi_input = net_psi_input_saved + reg_noise_std * torch.zeros(net_psi_input_saved.shape).type_as(
+        #     net_psi_input_saved.data).normal_()
 
         # change the learning rate
         scheduler.step(step)
@@ -187,10 +190,9 @@ for f in input_source[index:index+1]:
 
         # get the network output
         out_x = net_img(net_img_input)
-        out_psi = net_psi(net_psi_input)
-        # psi_as_classes = out_psi.argmax(dim=1).unsqueeze(1).float()
-        psi_as_classes = (out_psi * (DEPTH_MAX - DEPTH_MIN)).int().float()
-        out_rgb = fwd_model(out_x, psi_as_classes)
+        # out_psi = net_psi(net_psi_input)
+        fwd_model_inputs = torch.cat([out_x, psi_gt], dim=1)
+        out_rgb = fwd_model(fwd_model_inputs)
 
         rgb_size = out_rgb.shape
         cropw = rgb_size[2] - img_size[1]
@@ -202,7 +204,6 @@ for f in input_source[index:index+1]:
         else:
             total_loss = 1 - ssim(out_rgb, img)
 
-        total_loss += (smoothness_weight * tv_loss(out_psi))
         wandb.log({'Loss': total_loss.item()})
         total_loss.backward()
         optimizer.step()
@@ -210,22 +211,19 @@ for f in input_source[index:index+1]:
         if (step + 1) % opt.save_frequency == 0:
             _, C, H, W = out_rgb.shape
             out_x_np = out_x[0].permute(1, 2, 0).detach().cpu().numpy()
-            out_x_np = out_x_np[padh // 2: -(padh // 2), padw // 2: -(padw // 2), :]
+            # out_x_np = out_x_np[padh // 2: -(padh // 2), padw // 2: -(padw // 2), :]
             out_rgb_np = out_rgb[0].permute(1, 2, 0).detach().cpu().numpy()
             img_np = img[0].permute(1, 2, 0).cpu().numpy()
 
-            psi_np = psi_as_classes[0].permute(1, 2, 0).detach().cpu().numpy()
-            # psi_np = psi_np[padh // 2: -(padh // 2), padw // 2: -(padw // 2), :]
-            psi_np = psi_np / (DEPTH_MAX - DEPTH_MIN)  # Rescale from 0-14 into 0-1
-
+            # psi_np = psi_np / (DEPTH_MAX - DEPTH_MIN)  # Rescale from 0-14 into 0-1
 
             blur_psnr = psnr(out_rgb_np, img_np)
             sharp_psnr = psnr(out_x_np, sharp_img_np)
-            depth_psnr = psnr(psi_np, psi_map_ref)
+            # depth_psnr = psnr(psi_np, psi_map_ref)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
             blur_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
-            psi_map_to_log = np.zeros((H, 2 * W, 1), dtype=np.float)
+            # psi_map_to_log = np.zeros((H, 2 * W, 1), dtype=np.float)
 
             sharp_img_to_log[:, :W, :] = sharp_img_np
             sharp_img_to_log[:, W:, :] = out_x_np
@@ -233,16 +231,16 @@ for f in input_source[index:index+1]:
             blur_img_to_log[:, :W, :] = img_np
             blur_img_to_log[:, W:, :] = out_rgb_np
 
-            psi_map_to_log[:, :W, :] = psi_map_ref
-            psi_map_to_log[:, W:, :] = psi_np
-
+            # psi_map_to_log[:, :W, :] = psi_map_ref
+            # psi_map_to_log[:, W:, :] = psi_np
+            depth_psnr = -1.
             wandb.log(
                 {'Sharp Img':
                      wandb.Image(sharp_img_to_log, caption='PSNR: {}'.format(sharp_psnr)),
                  'Blur Img':
                      wandb.Image(blur_img_to_log, caption='PSNR: {}'.format(blur_psnr)),
-                 'Psi Map':
-                     wandb.Image(psi_map_to_log, caption='PSNR: {}'.format(depth_psnr)),
+                 # 'Psi Map':
+                 #     wandb.Image(psi_map_to_log, caption='PSNR: {}'.format(depth_psnr)),
                  }, commit=False)
 
             wandb.log({'blur psnr': blur_psnr, 'sharp psnr': sharp_psnr, 'depth psnr': depth_psnr}, commit=False)

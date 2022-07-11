@@ -44,7 +44,8 @@ class FwdModel(nn.Module):
              - unsqueeze(0) is done since F.conv2d expects [B, C, H, W] so adding Batch dim.
              - Casting the input to double to match the psf kernels weights type
         """
-        pad_input = sub_img.unsqueeze(0)
+        pad_val = tuple([self.psf_kernel_size // 2 for _ in range(4)])
+        pad_input = F.pad(sub_img, pad_val, mode='replicate').unsqueeze(0)
         blur_sub_img = F.conv2d(pad_input, psf_kernels.unsqueeze(1), bias=conv_bias, groups=self.num_psfs)
         return blur_sub_img.squeeze(0)
 
@@ -53,38 +54,38 @@ class FwdModel(nn.Module):
                                 atol=self.precomputed_params['psi_resolution'] / 2).nonzero(as_tuple=True)[0][0].item()
         return self.psf_kernels[:, :, :, psi_ind]
 
-    def forward(self, x, psi_map):
-        rgb_patches = x
-        depth_map_patches = psi_map
+    def _quantize_psi_values(self, scaled_psi_map):
+        quantized_scaled_psi_map = \
+            torch.round(scaled_psi_map / self.precomputed_params['psi_resolution']) * self.precomputed_params[
+                'psi_resolution']
+        return quantized_scaled_psi_map
 
-        num_samples, _, patch_h, patch_w = rgb_patches.shape
-        spatial_dim_w = patch_w - (self.psf_kernel_size - 1)
-        spatial_dim_h = patch_h - (self.psf_kernel_size - 1)
-        out = torch.zeros(num_samples, self.num_psfs, spatial_dim_h, spatial_dim_w, device=x.device)
-        for sample in range(num_samples):
-            current_img_patch = rgb_patches[sample]  # [3, patch_h, patch_w]
-            current_depth_patch = depth_map_patches[sample].clone()  # [3, patch_h, patch_w]
-            current_depth_patch += self.psi_range[0]  # Shift values from classes [0, 14] to Psi [-4, 10]
-            unique_depths = current_depth_patch.unique()
-            blurred_img_pt = torch.zeros(self.num_psfs, spatial_dim_h, spatial_dim_w, device=x.device)
-            overall_mask = torch.zeros(self.num_psfs, spatial_dim_h, spatial_dim_w, device=x.device)
+    def forward(self, x):
+        rgb = x[:, :3, :, :]
+        norm_psi = x[:, 3:, :, :]
+        quant_norm_psi = self._quantize_psi_values(norm_psi)
 
-            for unique_depth in unique_depths:
-                relevant_psf_kernels = self._extract_psf_kernels(unique_depth)
-                current_mask = (current_depth_patch == unique_depth).int()
-                current_mask = F.pad(current_mask, [self.psf_kernel_size // 2 for _ in range(4)],
-                                     mode='constant', value=1)
-                sub_img = current_img_patch * current_mask
-                blur_sub_img = self.psf_conv(sub_img, relevant_psf_kernels)
-                blurred_img_pt += blur_sub_img
-                # Construct normalization mask
-                current_mask = self.psf_conv(current_mask.repeat(3, 1, 1).float(), relevant_psf_kernels)
-                overall_mask += current_mask
+        B, _, h, w = rgb.shape
+        out = torch.zeros(B, self.num_psfs, h, w, device=x.device)
+        current_img_patch = rgb[0]  # [3, patch_h, patch_w]
+        current_depth_patch = quant_norm_psi[0]  # [1, patch_h, patch_w]
+        unique_depths = current_depth_patch.unique()
+        blurred_img_pt = torch.zeros(self.num_psfs, h, w, device=x.device)
+        overall_mask = torch.zeros(self.num_psfs, h, w, device=x.device)
 
-            # Normalization over all depths in image patch
-            overall_mask[overall_mask == 0] = 1
-            blurred_img_pt /= overall_mask
-            blurred_img_pt = torch.clip(blurred_img_pt, 0, 1)
-            out[sample] = blurred_img_pt
+        for unique_depth in unique_depths:
+            relevant_psf_kernels = self._extract_psf_kernels(unique_depth)
+            current_mask = (current_depth_patch == unique_depth).int()
+            sub_img = current_img_patch * current_mask
+            blur_sub_img = self.psf_conv(sub_img, relevant_psf_kernels)
+            blurred_img_pt = blurred_img_pt + blur_sub_img
+            # Construct normalization mask
+            current_mask = self.psf_conv(current_mask.repeat(3, 1, 1).float(), relevant_psf_kernels)
+            overall_mask = overall_mask + current_mask
+
+        # Normalization over all depths in image patch
+        overall_mask[overall_mask == 0] = 1
+        blurred_img_pt = blurred_img_pt / overall_mask
+        out[0] = torch.clip(blurred_img_pt, 0, 1)
 
         return out
