@@ -26,9 +26,8 @@ class GradLoss(nn.Module):
         self.op = Sobel()
         self.criterion = nn.L1Loss()
 
-    def forward(self, psi_map, img):
+    def forward(self, map, img):
         img_grad = self.op(img)
-        psi_grad = self.op(psi_map)
-        return self.criterion(img_grad, psi_grad)
-
+        map_grad = self.op(map.repeat(1, 3, 1, 1))
+        return self.criterion(img_grad, map_grad)
 

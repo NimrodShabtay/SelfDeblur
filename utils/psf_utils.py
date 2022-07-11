@@ -38,3 +38,10 @@ def depth_read(filename):
         ' depth_read:: Wrong input size (width = {0}, height = {1}).'.format(width, height)
     depth = np.fromfile(f, dtype=np.float32, count=-1).reshape((height, width))
     return depth
+
+
+def scale_psi(norm_psi_map, psi_min=-4., psi_max=10.):
+    psi_range = (psi_max - psi_min)
+    psi_range_center_sym = psi_min + (psi_range / 2)
+    scaled_psi_map = (norm_psi_map * psi_range / 2) + psi_range_center_sym
+    return scaled_psi_map
