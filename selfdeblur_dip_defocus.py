@@ -5,10 +5,8 @@ import argparse
 import os
 import numpy as np
 
-import utils.psf_utils
 from networks.skip import skip
 import glob
-import matplotlib.pyplot as plt
 
 import warnings
 from tqdm import tqdm
@@ -16,19 +14,18 @@ from torch.optim.lr_scheduler import MultiStepLR
 from utils.common_utils import *
 from SSIM import SSIM
 
-from torchvision.utils import save_image
 from torchvision.io import read_image
 from skimage.metrics import peak_signal_noise_ratio as psnr
 import wandb
 
 from Imaging_Fwd_model import FwdModel
-from utils.psf_utils import depth_read
-from utils.losses import TVLoss, GradLoss
-from kornia.losses import InverseDepthSmoothnessLoss
+from utils.psf_utils import depth_read, convert_weights_to_psi
+from utils.losses import TVLoss, ImageStatsLoss
+from utils.augmentations import Rotate, Shift
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--num_iter', type=int, default=3000, help='number of epochs of training')
+parser.add_argument('--num_iter', type=int, default=5000, help='number of epochs of training')
 parser.add_argument('--img_size', type=int, default=[256, 512], help='size of each image dimension')
 parser.add_argument('--kernel_size', type=int, default=[71, 71], help='size of blur kernel [height, width]')
 parser.add_argument('--data_path', type=str, default="datasets/real", help='path to blurry image')
@@ -108,27 +105,36 @@ for f in input_source[index:index+1]:
     input_depth = 32  # Consider split to depth and img with different depths
     img.unsqueeze_(0)
 
-    net_img_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
-    net_psi_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
+    # net_img_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
+    # net_psi_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
 
-    net_img = skip(input_depth, 3,
+    # net_img = skip(input_depth, 3,
+    #                num_channels_down=[128, 128, 128, 128, 128],
+    #                num_channels_up=[128, 128, 128, 128, 128],
+    #                num_channels_skip=[16, 16, 16, 16, 16],
+    #                upsample_mode='bilinear',
+    #                need_sigmoid=True, need_bias=True, pad=pad, act_fun='LeakyReLU')
+    #
+    # net_img = net_img.type(dtype)
+
+    # net_psi = skip(input_depth, PSI_CLASSES,
+    #                num_channels_down=[128, 128, 128, 128, 128],
+    #                num_channels_up=[128, 128, 128, 128, 128],
+    #                num_channels_skip=[16, 16, 16, 16, 16],
+    #                upsample_mode='bilinear',
+    #                need_sigmoid=True, need_bias=True, pad=pad, act_fun='LeakyReLU')
+    #
+    # net_psi = net_psi.type(dtype)
+
+    net_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
+    net = skip(input_depth, 3+PSI_CLASSES,
                    num_channels_down=[128, 128, 128, 128, 128],
                    num_channels_up=[128, 128, 128, 128, 128],
                    num_channels_skip=[16, 16, 16, 16, 16],
                    upsample_mode='bilinear',
                    need_sigmoid=True, need_bias=True, pad=pad, act_fun='LeakyReLU')
 
-    net_img = net_img.type(dtype)
-
-    net_psi = skip(input_depth, 1,
-                   num_channels_down=[128, 128, 128, 128, 128],
-                   num_channels_up=[128, 128, 128, 128, 128],
-                   num_channels_skip=[16, 16, 16, 16, 16],
-                   upsample_mode='bilinear',
-                   need_sigmoid=True, need_bias=True, pad=pad, act_fun='LeakyReLU')
-
-    net_psi = net_psi.type(dtype)
-
+    net = net.type(dtype)
     fwd_model = FwdModel()
     fwd_model.load_pre_compute_data('/mnt5/nimrod/depth_from_defocus/data/mask_synt_data/headbutt/output/data.mat')
     fwd_model.type(dtype)
@@ -137,19 +143,24 @@ for f in input_source[index:index+1]:
     mse = torch.nn.MSELoss().type(dtype)
     ssim = SSIM().type(dtype)
     tv_loss = TVLoss().type(dtype)
-    grad_loss = GradLoss().type(dtype)
-    # depth_smoothness_loss = InverseDepthSmoothnessLoss().type(dtype)
-    tv_weight = 0.2
-    grad_weight = 1
+    img_stats_loss = ImageStatsLoss().type(dtype)
+    tv_weight = 1
+    img_stats_weight = 0.5
+    req_weight = 1
+    # Augmentations
+    transform_rotate = Rotate(n_trans=2, random_rotate=True)
+    transform_shift = Shift(n_trans=3)
 
     # optimizer
-    optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
+    # optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
+    optimizer = torch.optim.Adam(net.parameters(), lr=LR)
     # optimizer = torch.optim.Adam([{'params': net_img.parameters()}], lr=LR)
     scheduler = MultiStepLR(optimizer, milestones=[1600, 1900, 2200], gamma=0.5)  # learning rates
 
     # initilization inputs
-    net_img_input_saved = net_img_input.detach().clone()
-    net_psi_input_saved = net_psi_input.detach().clone()
+    # net_img_input_saved = net_img_input.detach().clone()
+    # net_psi_input_saved = net_psi_input.detach().clone()
+    net_input_saved = net_input.detach().clone()
 
     log_config = {
         'input depth': input_depth,
@@ -160,13 +171,13 @@ for f in input_source[index:index+1]:
     }
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
-                     tags=['defocus'],
-                     name='Defocus - - Grad + TV regs',
+                     tags=['defocus', 'fwd_model2.0', 'Unified', 'ImgStatsLoss'],
+                     name='Defocus - Unified DIP + new fwd model + Augmentations + Regs: img stats',
                      job_type='train',
                      mode='online',
                      save_code=True,
                      config=log_config,
-                     notes='Defocus - Grad + TV regs on depth'
+                     notes='Defocus - Unified DIP, new fwd model + Augmentations + Regs: img stats'
                      )
 
     wandb.run.log_code(".")
@@ -175,21 +186,51 @@ for f in input_source[index:index+1]:
     for step in tqdm(range(num_iter)):
 
         # input regularization
-        net_img_input = net_img_input_saved + reg_noise_std * torch.zeros(net_img_input_saved.shape).type_as(
-            net_img_input_saved.data).normal_()
+        # net_img_input = net_img_input_saved + reg_noise_std * torch.zeros(net_img_input_saved.shape).type_as(
+        #     net_img_input_saved.data).normal_()
+        net_input = net_input_saved + reg_noise_std * torch.zeros(net_input_saved.shape).type_as(
+            net_input_saved.data).normal_()
 
-        net_psi_input = net_psi_input_saved + reg_noise_std * torch.zeros(net_psi_input_saved.shape).type_as(
-            net_psi_input_saved.data).normal_()
+        shift_vals = transform_shift.apply(torch.cat([net_input, img], dim=1))
+        inp_shift = shift_vals[:, :input_depth, :, :]
+        img_shift = shift_vals[:, input_depth:, :, :]
+
+        # rot_vals = transform_rotate.apply(torch.cat([net_input, img], dim=1))
+        # inp_rot = rot_vals[:, :input_depth, :, :]
+        # img_rot = rot_vals[:, input_depth:, :, :]
+
+        net_input_aug = torch.cat([net_input, inp_shift], dim=0)
+        imgs_aug = torch.cat([img, img_shift], dim=0)
+        # fig_rot, axes_rot = plt.subplots(1, transform_rotate.n_trans + 1, figsize=(10, 5))
+        # fig_shift, axes_shift = plt.subplots(1, transform_shift.n_trans + 1, figsize=(10, 5))
+        #
+        # axes_shift[0].imshow(net_input_aug[0].cpu().detach().permute(1, 2, 0)[:, :, 1])
+        # axes_shift[0].set_title('input')
+        # axes_shift[0].axis('off')
+        #
+        # # axes_rot[0].imshow(input[0].permute(1, 2, 0)[:, :, 1])
+        # # axes_rot[0].set_title('input')
+        # # axes_rot[0].axis('off')
+        #
+        # # for n, ax in enumerate(axes_rot[1:]):
+        # #     ax.imshow(inp_rotate[n].permute(1, 2, 0)[:, :, 1])
+        # #     ax.axis('off')
+        #
+        # for n, ax in enumerate(axes_shift[1:]):
+        #     ax.imshow(net_input_aug[n+1].cpu().detach().permute(1, 2, 0)[:, :, 1])
+        #     ax.axis('off')
+        #
+        # plt.show()
 
         # change the learning rate
         scheduler.step(step)
         optimizer.zero_grad()
 
         # get the network output
-        out_x = net_img(net_img_input)
-        out_psi = net_psi(net_psi_input)
-        scaled_psi = utils.psf_utils.scale_psi(out_psi)
-        fwd_model_inputs = torch.cat([out_x, scaled_psi], dim=1)
+        fwd_model_inputs = net(net_input_aug)
+        # out_x = net_img(net_img_input)
+        # out_psi = net_psi(net_input)
+        # fwd_model_inputs = torch.cat([out_x, out_psi], dim=1)
         out_rgb = fwd_model(fwd_model_inputs)
 
         rgb_size = out_rgb.shape
@@ -198,38 +239,43 @@ for f in input_source[index:index+1]:
         out_rgb = out_rgb[:, :, cropw // 2:cropw // 2 + img_size[1], croph // 2:croph // 2 + img_size[2]]
 
         if step < 500:
-            total_loss = mse(out_rgb, img)
+            total_loss = mse(out_rgb[:1], imgs_aug[:1]) + req_weight * mse(out_rgb[1:], imgs_aug[1:])
         else:
-            total_loss = 1 - ssim(out_rgb, img)
+            total_loss = (1 - ssim(out_rgb[:1], imgs_aug[:1])) + req_weight * (1 - ssim(out_rgb[1:], imgs_aug[1:]))
 
-        if step > 300:
-            reg_loss = tv_weight * tv_loss(out_psi) + grad_weight * grad_loss(out_psi, out_x)
-            total_loss += reg_loss
+        # reg_loss = tv_loss(fwd_model_inputs[:, 3:, :, :])
+        current_img_stats_loss = img_stats_loss(fwd_model_inputs[:, :3, :, :], img)
+        reg_loss = img_stats_weight * current_img_stats_loss
+        total_loss += reg_loss
 
         wandb.log({'Loss': total_loss.item()})
         total_loss.backward()
         optimizer.step()
 
         if step % opt.save_frequency == 0:
-            _, C, H, W = out_rgb.shape
+            B, C, H, W = out_rgb.shape
+            out_x = fwd_model_inputs[:, :3, :, :]
+            out_psi = fwd_model_inputs[:, 3:, :, :]
             out_x_np = out_x[0].permute(1, 2, 0).detach().cpu().numpy()
-            out_rgb_np = out_rgb[0].permute(1, 2, 0).detach().cpu().numpy()
-            img_np = img[0].permute(1, 2, 0).cpu().numpy()
+            out_rgb_np = out_rgb.permute(0, 2, 3, 1).detach().cpu().numpy()
+            img_np = imgs_aug.permute(0, 2, 3, 1).cpu().numpy()
             psi_np = out_psi[0].permute(1, 2, 0).cpu().detach().numpy()
+            weight_maps_as_depth = convert_weights_to_psi(psi_np, int(DEPTH_MIN), int(DEPTH_MAX))
+            psi_np = np.expand_dims((weight_maps_as_depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN), -1)
 
-            blur_psnr = psnr(out_rgb_np, img_np)
-            sharp_psnr = psnr(out_x_np, sharp_img_np)
-            depth_psnr = psnr(psi_np, psi_map_ref)
+            blur_psnr = np.array([psnr(img_np[i], out_rgb_np[i]) for i in range(B)])
+            sharp_psnr = psnr(sharp_img_np, out_x_np)
+            depth_psnr = psnr(psi_map_ref, psi_np)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
-            blur_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
+            blur_img_to_log = np.zeros((B, H, 2 * W, 3), dtype=np.float)
             psi_map_to_log = np.zeros((H, 2 * W, 1), dtype=np.float)
 
             sharp_img_to_log[:, :W, :] = sharp_img_np
             sharp_img_to_log[:, W:, :] = out_x_np
 
-            blur_img_to_log[:, :W, :] = img_np
-            blur_img_to_log[:, W:, :] = out_rgb_np
+            blur_img_to_log[:, :, :W, :] = img_np
+            blur_img_to_log[:, :, W:, :] = out_rgb_np
 
             psi_map_to_log[:, :W, :] = psi_map_ref
             psi_map_to_log[:, W:, :] = psi_np
@@ -242,13 +288,29 @@ for f in input_source[index:index+1]:
                 {'Sharp Img':
                      wandb.Image(sharp_img_to_log, caption='PSNR: {}'.format(sharp_psnr)),
                  'Blur Img':
-                     wandb.Image(blur_img_to_log, caption='PSNR: {}'.format(blur_psnr)),
+                     [wandb.Image(blur_img_to_log[idx], caption='PSNR: {}'.format(blur_psnr[idx])) for idx in range(B)],
                  'Psi Map':
                      [wandb.Image(psi_map_to_log, caption='PSNR: {}'.format(depth_psnr)),
                       wandb.Image(fig, caption='Depth for Visual purposes')],
                  }, commit=False)
 
-            wandb.log({'blur psnr': blur_psnr, 'sharp psnr': sharp_psnr, 'depth psnr': depth_psnr}, commit=False)
+            wandb_imgs = []
+            psi_weight_maps = out_psi[0, :, :, :].detach().cpu().permute(1, 2, 0)
+            index_vec = range(psi_weight_maps.shape[-1])
+            figures = []
+            images = []
+            for plane_idx in index_vec:
+                figures.append(plt.figure(figsize=(12, 6)))
+                images.append(plt.imshow(psi_weight_maps[:, :, plane_idx]))
+                plt.colorbar(images[-1], fraction=0.046, pad=0.04)
+                wandb_imgs.append(
+                    wandb.Image(figures[-1], caption='Psi {} weight map'.format(plane_idx + int(DEPTH_MIN))))
+
+            wandb.log({'Depth planes': wandb_imgs}, commit=False)
+            # wandb.log({'TVLoss': reg_loss.item()}, commit=False)
+            wandb.log({'Img Stats Loss': current_img_stats_loss.item()}, commit=False)
+            wandb.log({'blur psnr': blur_psnr.mean(), 'sharp psnr': sharp_psnr, 'depth psnr': depth_psnr}, commit=False)
+            plt.close('all')
             # save_path = os.path.join(opt.save_path, '%s_x.png' % imgname)
             # out_x = out_x.squeeze()
             # cropw, croph = padw, padh

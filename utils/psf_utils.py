@@ -45,3 +45,9 @@ def scale_psi(norm_psi_map, psi_min=-4., psi_max=10.):
     psi_range_center_sym = psi_min + (psi_range / 2)
     scaled_psi_map = (norm_psi_map * psi_range / 2) + psi_range_center_sym
     return scaled_psi_map
+
+
+def convert_weights_to_psi(depth_as_weights, psi_min, psi_max):
+    int_psi_vals = np.array([ps_v for ps_v in range(psi_min, psi_max + 1, 1)])
+    psi_from_weights = depth_as_weights @ int_psi_vals
+    return psi_from_weights

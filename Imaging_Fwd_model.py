@@ -37,6 +37,9 @@ class FwdModel(nn.Module):
 
         self.register_buffer('psf_kernels', torch.from_numpy(precomputed_params['psf_kernels']))
         self.register_buffer('psi_values', torch.from_numpy(precomputed_params['Psi']).float())
+        self.register_buffer('int_psi_values',
+                             torch.Tensor(
+                                 [psi_val for psi_val in self.psi_values if psi_val.int().float() == psi_val]))
 
     def psf_conv(self, sub_img, psf_kernels, conv_bias=None):
         """
@@ -61,6 +64,24 @@ class FwdModel(nn.Module):
         return quantized_scaled_psi_map
 
     def forward(self, x):
+        rgb = x[:, :3, :, :]
+        norm_psi = x[:, 3:, :, :]  # self._scale_value_to_psi_range(x[:, 3:, :, :])
+
+        B, C, H, W = rgb.shape
+        out = torch.zeros_like(rgb)
+        for sample_idx in range(B):
+            current_img_patch = rgb[sample_idx]  # [3, patch_h, patch_w]
+            current_depth_patch = norm_psi[sample_idx]  # [15, patch_h, patch_w]
+            blur_imgs = torch.zeros(len(self.int_psi_values), self.num_psfs, H, W, device=x.device)
+            for psi_ind, psi in enumerate(self.int_psi_values):
+                relevant_psf_kernels = self._extract_psf_kernels(psi)
+                blur_sub_img = self.psf_conv(current_img_patch, relevant_psf_kernels)
+                blur_imgs[psi_ind] = blur_sub_img
+
+            out[sample_idx] = torch.einsum('ijkl, jmkl -> imkl', current_depth_patch.unsqueeze(0), blur_imgs)
+        return out
+
+    def forward_org(self, x):
         rgb = x[:, :3, :, :]
         norm_psi = x[:, 3:, :, :]
         quant_norm_psi = self._quantize_psi_values(norm_psi)

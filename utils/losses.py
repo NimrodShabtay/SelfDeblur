@@ -31,3 +31,13 @@ class GradLoss(nn.Module):
         map_grad = self.op(map.repeat(1, 3, 1, 1))
         return self.criterion(img_grad, map_grad)
 
+
+class ImageStatsLoss(nn.Module):
+    def __init__(self):
+        super(ImageStatsLoss, self).__init__()
+        self.criterion = nn.MSELoss()
+
+    def forward(self, sharp_img, ref_blur_img):
+        ref_per_channel_mean = torch.mean(ref_blur_img, dim=[-2, -1])
+        sharp_img_per_channel_mean = torch.mean(sharp_img, dim=[-2, -1])
+        return self.criterion(ref_per_channel_mean, sharp_img_per_channel_mean)
