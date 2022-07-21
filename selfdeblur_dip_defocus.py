@@ -149,13 +149,13 @@ for f in input_source[index:index+1]:
     req_weight = 1
     # Augmentations
     transform_rotate = Rotate(n_trans=2, random_rotate=True)
-    transform_shift = Shift(n_trans=3)
+    transform_shift = Shift(n_trans=2)
 
     # optimizer
     # optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
     optimizer = torch.optim.Adam(net.parameters(), lr=LR)
     # optimizer = torch.optim.Adam([{'params': net_img.parameters()}], lr=LR)
-    scheduler = MultiStepLR(optimizer, milestones=[1600, 1900, 2200], gamma=0.5)  # learning rates
+    scheduler = MultiStepLR(optimizer, milestones=[2000, 3000, 4000], gamma=0.5)  # learning rates
 
     # initilization inputs
     # net_img_input_saved = net_img_input.detach().clone()
@@ -195,12 +195,12 @@ for f in input_source[index:index+1]:
         inp_shift = shift_vals[:, :input_depth, :, :]
         img_shift = shift_vals[:, input_depth:, :, :]
 
-        # rot_vals = transform_rotate.apply(torch.cat([net_input, img], dim=1))
-        # inp_rot = rot_vals[:, :input_depth, :, :]
-        # img_rot = rot_vals[:, input_depth:, :, :]
+        rot_vals = transform_rotate.apply(torch.cat([net_input, img], dim=1))
+        inp_rot = rot_vals[:, :input_depth, :, :]
+        img_rot = rot_vals[:, input_depth:, :, :]
 
-        net_input_aug = torch.cat([net_input, inp_shift], dim=0)
-        imgs_aug = torch.cat([img, img_shift], dim=0)
+        net_input_aug = torch.cat([net_input, inp_shift, inp_rot], dim=0)
+        imgs_aug = torch.cat([img, img_shift, img_rot], dim=0)
         # fig_rot, axes_rot = plt.subplots(1, transform_rotate.n_trans + 1, figsize=(10, 5))
         # fig_shift, axes_shift = plt.subplots(1, transform_shift.n_trans + 1, figsize=(10, 5))
         #
@@ -265,7 +265,7 @@ for f in input_source[index:index+1]:
 
             blur_psnr = np.array([psnr(img_np[i], out_rgb_np[i]) for i in range(B)])
             sharp_psnr = psnr(sharp_img_np, out_x_np)
-            depth_psnr = psnr(psi_map_ref, psi_np)
+            depth_psnr = psnr(psi_map_ref, weight_maps_as_depth)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
             blur_img_to_log = np.zeros((B, H, 2 * W, 3), dtype=np.float)
@@ -278,10 +278,10 @@ for f in input_source[index:index+1]:
             blur_img_to_log[:, :, W:, :] = out_rgb_np
 
             psi_map_to_log[:, :W, :] = psi_map_ref
-            psi_map_to_log[:, W:, :] = psi_np
+            psi_map_to_log[:, W:, :] = np.expand_dims(weight_maps_as_depth, -1)
 
             fig = plt.figure(figsize=(12, 6))
-            im = plt.imshow(psi_np)
+            im = plt.imshow(weight_maps_as_depth)
             plt.colorbar(im, fraction=0.046, pad=0.04)
 
             wandb.log(
