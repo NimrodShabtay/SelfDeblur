@@ -260,12 +260,12 @@ for f in input_source[index:index+1]:
             out_rgb_np = out_rgb.permute(0, 2, 3, 1).detach().cpu().numpy()
             img_np = imgs_aug.permute(0, 2, 3, 1).cpu().numpy()
             psi_np = out_psi[0].permute(1, 2, 0).cpu().detach().numpy()
-            weight_maps_as_depth = convert_weights_to_psi(psi_np, int(DEPTH_MIN), int(DEPTH_MAX))
-            psi_np = np.expand_dims((weight_maps_as_depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN), -1)
+            weight_maps_as_depth = np.expand_dims(convert_weights_to_psi(psi_np, int(DEPTH_MIN), int(DEPTH_MAX)), -1)
+            psi_np_norm = (weight_maps_as_depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN)
 
             blur_psnr = np.array([psnr(img_np[i], out_rgb_np[i]) for i in range(B)])
             sharp_psnr = psnr(sharp_img_np, out_x_np)
-            depth_psnr = psnr(psi_map_ref, weight_maps_as_depth)
+            depth_psnr = psnr(psi_map_ref, psi_np_norm)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
             blur_img_to_log = np.zeros((B, H, 2 * W, 3), dtype=np.float)
@@ -278,7 +278,7 @@ for f in input_source[index:index+1]:
             blur_img_to_log[:, :, W:, :] = out_rgb_np
 
             psi_map_to_log[:, :W, :] = psi_map_ref
-            psi_map_to_log[:, W:, :] = np.expand_dims(weight_maps_as_depth, -1)
+            psi_map_to_log[:, W:, :] = psi_np_norm
 
             fig = plt.figure(figsize=(12, 6))
             im = plt.imshow(weight_maps_as_depth)
