@@ -19,7 +19,7 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 import wandb
 
 from Imaging_Fwd_model import FwdModel
-from utils.psf_utils import depth_read, convert_weights_to_psi
+from utils.psf_utils import depth_read
 from utils.losses import TVLoss, ImageStatsLoss
 from utils.augmentations import Rotate, Shift
 
@@ -77,7 +77,7 @@ for f in input_source[index:index+1]:
     if imgname.find('maskImg') != -1:
         opt.kernel_size = [71, 71]
 
-    PSI_CLASSES = 15
+    PSI_INT_VALS = 15
     DEPTH_MIN = -4.0
     DEPTH_MAX = 10.0
 
@@ -127,7 +127,7 @@ for f in input_source[index:index+1]:
     # net_psi = net_psi.type(dtype)
 
     net_input = get_noise(input_depth, INPUT, (img_size[1], img_size[2])).type(dtype)
-    net = skip(input_depth, 3+PSI_CLASSES,
+    net = skip(input_depth, 4,
                    num_channels_down=[128, 128, 128, 128, 128],
                    num_channels_up=[128, 128, 128, 128, 128],
                    num_channels_skip=[16, 16, 16, 16, 16],
@@ -142,10 +142,6 @@ for f in input_source[index:index+1]:
     # Losses
     mse = torch.nn.MSELoss().type(dtype)
     ssim = SSIM().type(dtype)
-    tv_loss = TVLoss().type(dtype)
-    img_stats_loss = ImageStatsLoss().type(dtype)
-    tv_weight = 1
-    img_stats_weight = 0.5
     req_weight = 1
     # Augmentations
     transform_rotate = Rotate(n_trans=2, random_rotate=True)
@@ -155,7 +151,7 @@ for f in input_source[index:index+1]:
     # optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
     optimizer = torch.optim.Adam(net.parameters(), lr=LR)
     # optimizer = torch.optim.Adam([{'params': net_img.parameters()}], lr=LR)
-    scheduler = MultiStepLR(optimizer, milestones=[2000, 3000, 4000], gamma=0.5)  # learning rates
+    scheduler = MultiStepLR(optimizer, milestones=[3000, 4000, 5000], gamma=0.5)  # learning rates
 
     # initilization inputs
     # net_img_input_saved = net_img_input.detach().clone()
@@ -167,17 +163,17 @@ for f in input_source[index:index+1]:
         'losses': ', '.join(map(str, [type(mse).__name__, type(ssim).__name__])),
         'initial LR': LR,
         'reg_noise_std': reg_noise_std,
-        'Psi Classes': PSI_CLASSES
+        'Psi Classes': PSI_INT_VALS
     }
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
-                     tags=['defocus', 'fwd_model2.0', 'Unified', 'ImgStatsLoss'],
-                     name='Defocus - Unified DIP + new fwd model + Augmentations + Regs: img stats',
+                     tags=['defocus', 'fwd_model2.1', 'Unified'],
+                     name='Defocus - Unified DIP + fwd_model2.1 + Augmentations',
                      job_type='train',
-                     mode='online',
+                     mode='offline',
                      save_code=True,
                      config=log_config,
-                     notes='Defocus - Unified DIP, new fwd model + Augmentations + Regs: img stats'
+                     notes='Defocus - Unified DIP + fwd_model2.1 + Augmentations'
                      )
 
     wandb.run.log_code(".")
@@ -201,26 +197,6 @@ for f in input_source[index:index+1]:
 
         net_input_aug = torch.cat([net_input, inp_shift, inp_rot], dim=0)
         imgs_aug = torch.cat([img, img_shift, img_rot], dim=0)
-        # fig_rot, axes_rot = plt.subplots(1, transform_rotate.n_trans + 1, figsize=(10, 5))
-        # fig_shift, axes_shift = plt.subplots(1, transform_shift.n_trans + 1, figsize=(10, 5))
-        #
-        # axes_shift[0].imshow(net_input_aug[0].cpu().detach().permute(1, 2, 0)[:, :, 1])
-        # axes_shift[0].set_title('input')
-        # axes_shift[0].axis('off')
-        #
-        # # axes_rot[0].imshow(input[0].permute(1, 2, 0)[:, :, 1])
-        # # axes_rot[0].set_title('input')
-        # # axes_rot[0].axis('off')
-        #
-        # # for n, ax in enumerate(axes_rot[1:]):
-        # #     ax.imshow(inp_rotate[n].permute(1, 2, 0)[:, :, 1])
-        # #     ax.axis('off')
-        #
-        # for n, ax in enumerate(axes_shift[1:]):
-        #     ax.imshow(net_input_aug[n+1].cpu().detach().permute(1, 2, 0)[:, :, 1])
-        #     ax.axis('off')
-        #
-        # plt.show()
 
         # change the learning rate
         scheduler.step(step)
@@ -231,7 +207,7 @@ for f in input_source[index:index+1]:
         # out_x = net_img(net_img_input)
         # out_psi = net_psi(net_input)
         # fwd_model_inputs = torch.cat([out_x, out_psi], dim=1)
-        out_rgb = fwd_model(fwd_model_inputs)
+        out_rgb = fwd_model(fwd_model_inputs, step)
 
         rgb_size = out_rgb.shape
         cropw = rgb_size[2] - img_size[1]
@@ -242,11 +218,6 @@ for f in input_source[index:index+1]:
             total_loss = mse(out_rgb[:1], imgs_aug[:1]) + req_weight * mse(out_rgb[1:], imgs_aug[1:])
         else:
             total_loss = (1 - ssim(out_rgb[:1], imgs_aug[:1])) + req_weight * (1 - ssim(out_rgb[1:], imgs_aug[1:]))
-
-        # reg_loss = tv_loss(fwd_model_inputs[:, 3:, :, :])
-        current_img_stats_loss = img_stats_loss(fwd_model_inputs[:, :3, :, :], img)
-        reg_loss = img_stats_weight * current_img_stats_loss
-        total_loss += reg_loss
 
         wandb.log({'Loss': total_loss.item()})
         total_loss.backward()
@@ -260,12 +231,11 @@ for f in input_source[index:index+1]:
             out_rgb_np = out_rgb.permute(0, 2, 3, 1).detach().cpu().numpy()
             img_np = imgs_aug.permute(0, 2, 3, 1).cpu().numpy()
             psi_np = out_psi[0].permute(1, 2, 0).cpu().detach().numpy()
-            weight_maps_as_depth = np.expand_dims(convert_weights_to_psi(psi_np, int(DEPTH_MIN), int(DEPTH_MAX)), -1)
-            psi_np_norm = (weight_maps_as_depth - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN)
+            psi_np_norm = psi_np * (DEPTH_MAX - DEPTH_MIN) + DEPTH_MIN
 
             blur_psnr = np.array([psnr(img_np[i], out_rgb_np[i]) for i in range(B)])
             sharp_psnr = psnr(sharp_img_np, out_x_np)
-            depth_psnr = psnr(psi_map_ref, psi_np_norm)
+            depth_psnr = psnr(psi_map_ref, psi_np)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
             blur_img_to_log = np.zeros((B, H, 2 * W, 3), dtype=np.float)
@@ -277,11 +247,11 @@ for f in input_source[index:index+1]:
             blur_img_to_log[:, :, :W, :] = img_np
             blur_img_to_log[:, :, W:, :] = out_rgb_np
 
-            psi_map_to_log[:, :W, :] = psi_map_ref
+            psi_map_to_log[:, :W, :] = psi_np
             psi_map_to_log[:, W:, :] = psi_np_norm
 
             fig = plt.figure(figsize=(12, 6))
-            im = plt.imshow(weight_maps_as_depth)
+            im = plt.imshow(psi_np_norm)
             plt.colorbar(im, fraction=0.046, pad=0.04)
 
             wandb.log(
@@ -294,28 +264,6 @@ for f in input_source[index:index+1]:
                       wandb.Image(fig, caption='Depth for Visual purposes')],
                  }, commit=False)
 
-            wandb_imgs = []
-            psi_weight_maps = out_psi[0, :, :, :].detach().cpu().permute(1, 2, 0)
-            index_vec = range(psi_weight_maps.shape[-1])
-            figures = []
-            images = []
-            for plane_idx in index_vec:
-                figures.append(plt.figure(figsize=(12, 6)))
-                images.append(plt.imshow(psi_weight_maps[:, :, plane_idx]))
-                plt.colorbar(images[-1], fraction=0.046, pad=0.04)
-                wandb_imgs.append(
-                    wandb.Image(figures[-1], caption='Psi {} weight map'.format(plane_idx + int(DEPTH_MIN))))
-
-            wandb.log({'Depth planes': wandb_imgs}, commit=False)
-            # wandb.log({'TVLoss': reg_loss.item()}, commit=False)
-            wandb.log({'Img Stats Loss': current_img_stats_loss.item()}, commit=False)
             wandb.log({'blur psnr': blur_psnr.mean(), 'sharp psnr': sharp_psnr, 'depth psnr': depth_psnr}, commit=False)
             plt.close('all')
-            # save_path = os.path.join(opt.save_path, '%s_x.png' % imgname)
-            # out_x = out_x.squeeze()
-            # cropw, croph = padw, padh
-            # out_x = out_x[:, cropw // 2:cropw // 2 + img_size[1], croph // 2:croph // 2 + img_size[2]]
-            # save_image(out_x, save_path)
-            #
-            # torch.save(net, os.path.join(opt.save_path, "%s_xnet.pth" % imgname))
 

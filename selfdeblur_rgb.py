@@ -17,18 +17,16 @@ from PIL import Image
 import warnings
 from tqdm import tqdm
 from torch.optim.lr_scheduler import MultiStepLR
+from torchvision.io import read_image
 from utils.common_utils import *
 from SSIM import SSIM
-
-from torchvision.utils import save_image
-from torchvision.io import read_image
-from skimage.metrics import peak_signal_noise_ratio as psnr
 from utils.psf_utils import extract_psf_from_matlab
 import wandb
+from skimage.metrics import peak_signal_noise_ratio as psnr
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--num_iter', type=int, default=2500, help='number of epochs of training')
+parser.add_argument('--num_iter', type=int, default=5000, help='number of epochs of training')
 parser.add_argument('--img_size', type=int, default=[256, 256], help='size of each image dimension')
 parser.add_argument('--kernel_size', type=int, default=[31, 31], help='size of blur kernel [height, width]')
 parser.add_argument('--data_path', type=str, default="datasets/real", help='path to blurry image')
@@ -52,16 +50,13 @@ input_source.sort()
 sharp_source = glob.glob(os.path.join(opt.data_path, 'Images', '*.png'))
 sharp_source.sort()
 
-psi_maps_source = glob.glob(os.path.join(opt.data_path, 'output_downscaled/GT', '*.dpt'))
-psi_maps_source.sort()
-
 save_path = opt.save_path
 os.makedirs(save_path, exist_ok=True)
 
 files_source = input_source
-
 # start #image
-for f in files_source[0:1]:
+idx = 0
+for f in files_source[idx:idx+1]:
     INPUT = 'noise'
     pad = 'reflection'
     LR = 0.01
@@ -85,21 +80,26 @@ for f in files_source[0:1]:
     img /= 255.0
     img_size = img.shape
 
-    sharp_img = read_image(glob.glob(os.path.join(opt.data_path, 'sharp_imgs', '*.png'))[0]).float()
+    sharp_img = read_image(sharp_source[idx]).float()
     sharp_img /= 255.0
     sharp_img_np = sharp_img.permute(1, 2, 0).numpy()
+
+    psf_mat_file_path = '/mnt5/nimrod/SelfDeblur/datasets/synt/city_cls/data.mat'
+    out_k_m_ref = extract_psf_from_matlab(psf_mat_file_path, dtype=dtype)
+
     print(imgname)
     # ######################################################################
 
     padw, padh = opt.kernel_size[0]-1, opt.kernel_size[1]-1
     opt.img_size[0], opt.img_size[1] = img_size[1]+padw, img_size[2]+padh
+    #y = y[:, padh//2:img_size[1]-padh//2, padw//2:img_size[2]-padw//2]
+    # y = np_to_torch(y).type(dtype)
 
-    input_depth = 32
-    out_depth = 3
-    img.unsqueeze_(0)
+    input_depth = 8
+
     net_input = get_noise(input_depth, INPUT, (opt.img_size[0], opt.img_size[1])).type(dtype)
 
-    net = skip(input_depth, out_depth,
+    net = skip(input_depth, 3,
                num_channels_down=[128, 128, 128, 128, 128],
                num_channels_up=[128, 128, 128, 128, 128],
                num_channels_skip=[16, 16, 16, 16, 16],
@@ -108,23 +108,27 @@ for f in files_source[0:1]:
 
     net = net.type(dtype)
 
-    psf_mat_file_path = '/mnt5/nimrod/SelfDeblur/datasets/synt/city_cls/data.mat'
-    out_k_m = extract_psf_from_matlab(psf_mat_file_path, dtype=dtype)
+    n_k = 200 * 3
+    net_input_kernel = get_noise(n_k, INPUT, (1, 1)).type(dtype)
+    net_input_kernel.squeeze_()
+
+    net_kernel = fcn(n_k, 3 * opt.kernel_size[0] * opt.kernel_size[1], num_hidden=3000)
+    net_kernel = net_kernel.type(dtype)
 
     # Losses
     mse = torch.nn.MSELoss().type(dtype)
-    ssim = SSIM().type(dtype)
+    ssim = SSIM(channels=3).type(dtype)
 
     # optimizer
-    optimizer = torch.optim.Adam(net.parameters(), lr=LR)
+    optimizer = torch.optim.Adam([{'params': net.parameters()}, {'params': net_kernel.parameters(), 'lr': 1e-4}], lr=LR)
     scheduler = MultiStepLR(optimizer, milestones=[1600, 1900, 2200], gamma=0.5)  # learning rates
 
     # initilization inputs
     net_input_saved = net_input.detach().clone()
+    net_input_kernel_saved = net_input_kernel.detach().clone()
 
     log_config = {
         'input depth': input_depth,
-        'out depth': out_depth,
         'PSF mat file': psf_mat_file_path,
         'losses': ', '.join(map(str, [type(mse).__name__, type(ssim).__name__])),
         'initial LR': LR,
@@ -132,8 +136,8 @@ for f in files_source[0:1]:
     }
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
-                     tags=['deblurring', 'known kernel'],
-                     name='Deblurring with known kernel',
+                     tags=['deblurring', 'unknown kernel', 'reference'],
+                     name='Deblurring with unknown kernel - RGB',
                      job_type='train',
                      mode='online',
                      save_code=True,
@@ -157,36 +161,40 @@ for f in files_source[0:1]:
 
         # get the network output
         out_x = net(net_input)
+        out_k = net_kernel(net_input_kernel)
+
+        out_k_m = out_k.view(3, 1, opt.kernel_size[0], opt.kernel_size[1])
 
         # print(out_k_m)
-        out_rgb = nn.functional.conv2d(out_x, out_k_m.unsqueeze(1), padding=0, bias=None, groups=3)
+        out_img = nn.functional.conv2d(out_x, out_k_m, padding=0, bias=None, groups=3)
 
-        rgb_size = out_rgb.shape
-        cropw = rgb_size[2] - img_size[1]
-        croph = rgb_size[3] - img_size[2]
-        out_rgb = out_rgb[:, :, cropw // 2:cropw // 2 + img_size[1], croph // 2:croph // 2 + img_size[2]]
+        out_img_size = out_img.shape
+        cropw = out_img_size[2]-img_size[1]
+        croph = out_img_size[3]-img_size[2]
+        out_img = out_img[:, :, cropw // 2:cropw // 2 + img_size[1], croph // 2:croph // 2 + img_size[2]]
 
         if step < 500:
-            total_loss = mse(out_rgb, img)
+            total_loss = mse(out_img, img)
         else:
-            total_loss = 1 - ssim(out_rgb, img)
+            total_loss = 1 - ssim(out_img, img.unsqueeze(0))
 
         wandb.log({'Loss': total_loss.item()})
         total_loss.backward()
         optimizer.step()
 
         if (step + 1) % opt.save_frequency == 0:
-            _, C, H, W = out_rgb.shape
+            # print('Iteration %05d' %(step+1))
+            B, C, H, W = out_img.shape
             out_x_np = out_x[0].permute(1, 2, 0).detach().cpu().numpy()
             out_x_np = out_x_np[padh // 2: -(padh // 2), padw // 2: -(padw // 2), :]
-            out_rgb_np = out_rgb[0].permute(1, 2, 0).detach().cpu().numpy()
-            img_np = img[0].permute(1, 2, 0).cpu().numpy()
+            out_rgb_np = out_img[0].permute(1, 2, 0).detach().cpu().numpy()
+            img_np = img.permute(1, 2, 0).cpu().numpy()
 
-            blur_psnr = psnr(out_rgb_np, img_np)
-            sharp_psnr = psnr(out_x_np, sharp_img_np)
+            blur_psnr = psnr(img_np, out_rgb_np)
+            sharp_psnr = psnr(sharp_img_np, out_x_np)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
-            blur_img_to_log  = np.zeros((H, 2 * W, 3), dtype=np.float)
+            blur_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
 
             sharp_img_to_log[:, :W, :] = sharp_img_np
             sharp_img_to_log[:, W:, :] = out_x_np
@@ -200,12 +208,4 @@ for f in files_source[0:1]:
                  'Blur Img':
                      wandb.Image(blur_img_to_log, caption='PSNR: {}'.format(blur_psnr))}, commit=False)
 
-            wandb.log({'blur psnr': blur_psnr, 'sharp psnr': sharp_psnr}, commit=False)
-            # save_path = os.path.join(opt.save_path, '%s_x.png' % imgname)
-            # out_x = out_x.squeeze()
-            # cropw, croph = padw, padh
-            # out_x = out_x[:, cropw // 2:cropw // 2 + img_size[1], croph // 2:croph // 2 + img_size[2]]
-            # save_image(out_x, save_path)
-            #
-            # torch.save(net, os.path.join(opt.save_path, "%s_xnet.pth" % imgname))
-
+            wandb.log({'blur psnr': blur_psnr.mean(), 'sharp psnr': sharp_psnr}, commit=False)
