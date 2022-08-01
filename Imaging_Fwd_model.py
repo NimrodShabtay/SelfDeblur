@@ -129,7 +129,7 @@ class FwdModel(nn.Module):
         wandb.log({'Depth weights': wandb_imgs}, commit=False)
         plt.close('all')
 
-    def forward(self, x, epoch):
+    def forward(self, x, epoch, debug=False):
         rgb = x[:, :3, :, :]
         scaled_weights = self.scale_value_to_psi_range(x[:, 3:, :, :])
         int_planes = self.int_psi_values.view(1, -1, 1, 1).expand(
@@ -144,7 +144,7 @@ class FwdModel(nn.Module):
         interpolation_weights = self.act(1 - torch.abs(scaled_weights - int_planes))
         out = torch.einsum('nijkl, njmkl -> nmkl', interpolation_weights.unsqueeze(1), blur_imgs)
 
-        if epoch % 100 == 0:
+        if debug and epoch % 100 == 0:
             self.log_depth_weights(interpolation_weights.detach().cpu())
 
         return out

@@ -19,10 +19,9 @@ from skimage.metrics import peak_signal_noise_ratio as psnr
 import wandb
 
 from Imaging_Fwd_model import FwdModel
-from utils.psf_utils import depth_read
-from utils.losses import TVLoss, ImageStatsLoss
+from utils.psf_utils import depth_read, calc_average_error_for_depth
 from utils.augmentations import Rotate, Shift
-
+from utils.bilateral_filter import BilateralFilter
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--num_iter', type=int, default=5000, help='number of epochs of training')
@@ -30,7 +29,8 @@ parser.add_argument('--img_size', type=int, default=[256, 512], help='size of ea
 parser.add_argument('--kernel_size', type=int, default=[71, 71], help='size of blur kernel [height, width]')
 parser.add_argument('--data_path', type=str, default="datasets/real", help='path to blurry image')
 parser.add_argument('--save_path', type=str, default="results/synt/", help='path to deblurring results')
-parser.add_argument('--save_frequency', type=int, default=100, help='lfrequency to save results')
+parser.add_argument('--save_frequency', type=int, default=1000, help='frequency to save results')
+parser.add_argument('--index', type=int, default=0, help='image index in dataset')
 parser.add_argument('--gpu', default='0')
 
 opt = parser.parse_args()
@@ -43,19 +43,19 @@ dtype = torch.cuda.FloatTensor
 
 warnings.filterwarnings("ignore")
 
-input_source = glob.glob(os.path.join(opt.data_path, 'output_downscaled/rgb',  '*.png'))
+input_source = glob.glob(os.path.join(opt.data_path, 'rgb',  '*.png'))
 input_source.sort()
 
-sharp_source = glob.glob(os.path.join(opt.data_path, 'Images', '*.png'))
+sharp_source = glob.glob(os.path.join(opt.data_path, 'inputs', '*.png'))
 sharp_source.sort()
 
-psi_maps_source = glob.glob(os.path.join(opt.data_path, 'output_downscaled/GT', '*.dpt'))
+psi_maps_source = glob.glob(os.path.join(opt.data_path, 'GT', '*.dpt'))
 psi_maps_source.sort()
 
 save_path = opt.save_path
 os.makedirs(save_path, exist_ok=True)
 
-index = 86
+index = opt.index
 # start #image
 for f in input_source[index:index+1]:
     INPUT = 'noise'
@@ -95,7 +95,6 @@ for f in input_source[index:index+1]:
 
     psi_map_ref = (psi_map_ref - DEPTH_MIN) / (DEPTH_MAX - DEPTH_MIN)
 
-    # psi_gt = torch.from_numpy(psi_map_ref).permute(2, 0, 1).unsqueeze(0).type(dtype)
     print(imgname)
     # ######################################################################
 
@@ -139,6 +138,7 @@ for f in input_source[index:index+1]:
     fwd_model.load_pre_compute_data('/mnt5/nimrod/depth_from_defocus/data/mask_synt_data/headbutt/output/data.mat')
     fwd_model.type(dtype)
 
+    bilateral_filt = BilateralFilter(ksize=11).type(dtype)
     # Losses
     mse = torch.nn.MSELoss().type(dtype)
     ssim = SSIM().type(dtype)
@@ -151,7 +151,7 @@ for f in input_source[index:index+1]:
     # optimizer = torch.optim.Adam([{'params': net_img.parameters()}, {'params': net_psi.parameters()}], lr=LR)
     optimizer = torch.optim.Adam(net.parameters(), lr=LR)
     # optimizer = torch.optim.Adam([{'params': net_img.parameters()}], lr=LR)
-    scheduler = MultiStepLR(optimizer, milestones=[3000, 4000, 5000], gamma=0.5)  # learning rates
+    scheduler = MultiStepLR(optimizer, milestones=[4000, 5000], gamma=0.5)  # learning rates
 
     # initilization inputs
     # net_img_input_saved = net_img_input.detach().clone()
@@ -168,12 +168,12 @@ for f in input_source[index:index+1]:
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
                      tags=['defocus', 'fwd_model2.1', 'Unified'],
-                     name='Defocus - Unified DIP + fwd_model2.1 + Augmentations',
+                     name='Defocus - Unified DIP + fwd_model2.1 + Augmentations + Bilateral Depth',
                      job_type='train',
-                     mode='offline',
+                     mode='online',
                      save_code=True,
                      config=log_config,
-                     notes='Defocus - Unified DIP + fwd_model2.1 + Augmentations'
+                     notes='Defocus - Unified DIP + fwd_model2.1 + Augmentations + Bilateral Depth'
                      )
 
     wandb.run.log_code(".")
@@ -203,10 +203,9 @@ for f in input_source[index:index+1]:
         optimizer.zero_grad()
 
         # get the network output
-        fwd_model_inputs = net(net_input_aug)
-        # out_x = net_img(net_img_input)
-        # out_psi = net_psi(net_input)
-        # fwd_model_inputs = torch.cat([out_x, out_psi], dim=1)
+        implicit_model_outputs = net(net_input_aug)
+        fwd_model_inputs = torch.cat([implicit_model_outputs[:, :3, :, :],
+                                      bilateral_filt(implicit_model_outputs[:, 3:, :, :])], dim=1)
         out_rgb = fwd_model(fwd_model_inputs, step)
 
         rgb_size = out_rgb.shape
@@ -235,7 +234,7 @@ for f in input_source[index:index+1]:
 
             blur_psnr = np.array([psnr(img_np[i], out_rgb_np[i]) for i in range(B)])
             sharp_psnr = psnr(sharp_img_np, out_x_np)
-            depth_psnr = psnr(psi_map_ref, psi_np)
+            depth_error_in_meters = calc_average_error_for_depth(psi_np, psi_map_ref)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
             blur_img_to_log = np.zeros((B, H, 2 * W, 3), dtype=np.float)
@@ -247,8 +246,8 @@ for f in input_source[index:index+1]:
             blur_img_to_log[:, :, :W, :] = img_np
             blur_img_to_log[:, :, W:, :] = out_rgb_np
 
-            psi_map_to_log[:, :W, :] = psi_np
-            psi_map_to_log[:, W:, :] = psi_np_norm
+            psi_map_to_log[:, :W, :] = psi_map_ref
+            psi_map_to_log[:, W:, :] = psi_np
 
             fig = plt.figure(figsize=(12, 6))
             im = plt.imshow(psi_np_norm)
@@ -260,10 +259,11 @@ for f in input_source[index:index+1]:
                  'Blur Img':
                      [wandb.Image(blur_img_to_log[idx], caption='PSNR: {}'.format(blur_psnr[idx])) for idx in range(B)],
                  'Psi Map':
-                     [wandb.Image(psi_map_to_log, caption='PSNR: {}'.format(depth_psnr)),
+                     [wandb.Image(psi_map_to_log, caption='Depth error[m]: {}'.format(depth_error_in_meters)),
                       wandb.Image(fig, caption='Depth for Visual purposes')],
                  }, commit=False)
 
-            wandb.log({'blur psnr': blur_psnr.mean(), 'sharp psnr': sharp_psnr, 'depth psnr': depth_psnr}, commit=False)
+            wandb.log({'blur psnr': blur_psnr.mean(), 'sharp psnr': sharp_psnr,
+                       'depth error [m]': depth_error_in_meters}, commit=False)
             plt.close('all')
 

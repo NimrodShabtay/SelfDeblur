@@ -82,7 +82,7 @@ for f in files_source[idx:idx+1]:
     y = np.expand_dims(y, 0)
     img_size = y.shape
 
-    sharp_img, _, _, _ = readimg(path_to_image)
+    sharp_img, _, _, _ = readimg(sharp_source[idx])
     sharp_img_np = np.float32(sharp_img / 255.0)
     # sharp_img_np = np.expand_dims(sharp_img, 0)
 
@@ -139,7 +139,7 @@ for f in files_source[idx:idx+1]:
                      tags=['deblurring', 'unknown kernel', 'reference'],
                      name='Deblurring - Ycbcr',
                      job_type='train',
-                     mode='online',
+                     mode='offline',
                      save_code=True,
                      config=log_config,
                      notes='Psi = 4 for all map'

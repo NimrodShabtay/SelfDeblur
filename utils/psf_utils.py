@@ -51,3 +51,25 @@ def convert_weights_to_psi(depth_as_weights, psi_min, psi_max):
     int_psi_vals = np.array([ps_v for ps_v in range(psi_min, psi_max + 1, 1)])
     psi_from_weights = depth_as_weights @ int_psi_vals
     return psi_from_weights
+
+
+def convert_psi_to_meters(psi_map, apperature_radius=1.14, ref_wavelength=455, focus_pt=900):
+    """
+    :param psi_map: Psi map, rounded and clipped between -4 and 10
+    :param apperature_radius: measuered in mm
+    :param ref_wavelength: the focus wave length (Blue) in mm
+    :param focus_pt: measured in mm
+    :return: depth map in meters
+    """
+    focus_pt_in_meters = focus_pt / 1e3
+    ref_wavelength_in_meters = ref_wavelength / 1e6
+    depth_map_in_meters = 1 / ((ref_wavelength_in_meters * 1e3) / (np.pi * np.square(apperature_radius)) *
+                               psi_map + 1 / focus_pt_in_meters)
+    return depth_map_in_meters
+
+
+def calc_average_error_for_depth(psi_pred, psi_gt):
+    pred_in_meters = convert_psi_to_meters(psi_pred)
+    gt_in_meters = convert_psi_to_meters(psi_gt)
+
+    return np.mean(np.abs(gt_in_meters - pred_in_meters))
