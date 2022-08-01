@@ -16,6 +16,7 @@ from SSIM import SSIM
 
 from torchvision.io import read_image
 from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity
 import wandb
 
 from Imaging_Fwd_model import FwdModel
@@ -168,13 +169,13 @@ for f in input_source[index:index+1]:
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
                      tags=['defocus', 'fwd_model2.1', 'Unified'],
-                     name='Defocus - Unified DIP + fwd_model2.1 + Augmentations + Bilateral Depth',
-                     job_type='eval',
-                     group='Bilateral_11_no_TV',
+                     name='{}'.format(imgname),
+                     job_type='optimize',
+                     group='no_reg',
                      mode='online',
                      save_code=True,
                      config=log_config,
-                     notes='Defocus - Unified DIP + fwd_model2.1 + Augmentations + Bilateral Depth'
+                     notes='Defocus - Unified DIP + fwd_model2.1 + Augmentations'
                      )
 
     wandb.run.log_code(".")
@@ -204,9 +205,9 @@ for f in input_source[index:index+1]:
         optimizer.zero_grad()
 
         # get the network output
-        implicit_model_outputs = net(net_input_aug)
-        fwd_model_inputs = torch.cat([implicit_model_outputs[:, :3, :, :],
-                                      bilateral_filt(implicit_model_outputs[:, 3:, :, :])], dim=1)
+        fwd_model_inputs = net(net_input_aug)
+        # fwd_model_inputs = torch.cat([implicit_model_outputs[:, :3, :, :],
+        #                               bilateral_filt(implicit_model_outputs[:, 3:, :, :])], dim=1)
         out_rgb = fwd_model(fwd_model_inputs, step)
 
         rgb_size = out_rgb.shape
@@ -235,6 +236,7 @@ for f in input_source[index:index+1]:
 
             blur_psnr = np.array([psnr(img_np[i], out_rgb_np[i]) for i in range(B)])
             sharp_psnr = psnr(sharp_img_np, out_x_np)
+            sharp_ssim = structural_similarity(sharp_img_np, out_x_np, multichannel=True)
             depth_error_in_meters = calc_average_error_for_depth(psi_np, psi_map_ref)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 3), dtype=np.float)
@@ -256,7 +258,7 @@ for f in input_source[index:index+1]:
 
             wandb.log(
                 {'Sharp Img':
-                     wandb.Image(sharp_img_to_log, caption='PSNR: {}'.format(sharp_psnr)),
+                     wandb.Image(sharp_img_to_log, caption='PSNR: {}, SSIM: {}'.format(sharp_psnr, sharp_ssim)),
                  'Blur Img':
                      [wandb.Image(blur_img_to_log[idx], caption='PSNR: {}'.format(blur_psnr[idx])) for idx in range(B)],
                  'Psi Map':

@@ -23,6 +23,7 @@ from SSIM import SSIM
 from utils.psf_utils import extract_psf_from_matlab
 import wandb
 from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.metrics import structural_similarity
 
 
 parser = argparse.ArgumentParser()
@@ -110,7 +111,7 @@ for f in files_source[idx:idx+1]:
 
     net = net.type(dtype)
 
-    n_k = 200 * 3
+    n_k = 200 * 2
     net_input_kernel = get_noise(n_k, INPUT, (1, 1)).type(dtype)
     net_input_kernel.squeeze_()
 
@@ -136,14 +137,14 @@ for f in files_source[idx:idx+1]:
         'initial LR': LR,
         'reg_noise_std': reg_noise_std,
         'n_k': n_k,
-        'num_hidden': '[1000]'
+        'num_hidden': '[1000, 1000, 1000]'
     }
     run = wandb.init(project="Dip-Defocus",
                      entity="impliciteam",
                      tags=['deblurring', 'unknown kernel', 'reference'],
                      name='Deblurring with unknown kernel - R channel',
                      job_type='train',
-                     mode='offline',
+                     mode='online',
                      save_code=True,
                      config=log_config,
                      notes='PSI = -4 for all map'
@@ -197,6 +198,7 @@ for f in files_source[idx:idx+1]:
 
             blur_psnr = psnr(img_np, out_rgb_np)
             sharp_psnr = psnr(sharp_img_np, out_x_np)
+            sharp_ssim = structural_similarity(sharp_img_np, out_x_np, multichannel=False)
 
             sharp_img_to_log = np.zeros((H, 2 * W, 1), dtype=np.float)
             blur_img_to_log = np.zeros((H, 2 * W, 1), dtype=np.float)
@@ -209,7 +211,7 @@ for f in files_source[idx:idx+1]:
 
             wandb.log(
                 {'Sharp Img':
-                     wandb.Image(sharp_img_to_log, caption='PSNR: {}'.format(sharp_psnr)),
+                     wandb.Image(sharp_img_to_log, caption='PSNR: {}, SSIM: {}'.format(sharp_psnr, sharp_ssim)),
                  'Blur Img':
                      wandb.Image(blur_img_to_log, caption='PSNR: {}'.format(blur_psnr))}, commit=False)
 
